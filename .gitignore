@@ -1,0 +1,48 @@
+# Environnements virtuels
+myenv/
+.env
+
+# Données sensibles
+*.env
+
+# Caches Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Dossiers de logs
+logs/
+*.log
+*.out
+*.err
+
+# Bases de données locales
+*.sqlite3
+*.db
+
+# Données générées ou temporairement utilisées
+chroma/
+data/
+*.tmp
+
+# Configurations d'environnement local
+.vscode/
+.idea/
+*.swp
+
+# Bibliothèques installées localement (ne pas inclure si elles sont déjà listées dans requirements.txt)
+venv/
+env/
+
+# Fichiers compressés ou binaires
+*.zip
+*.tar.gz
+*.rar
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Dépendances système (exemple : fichiers de Docker, etc.)
+docker-compose.override.yml
