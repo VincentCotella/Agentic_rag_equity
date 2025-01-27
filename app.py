@@ -70,7 +70,9 @@ def generate_plot_tool(query, df):
     client = Groq()
     code_prompt = (
         "You are an AI assistant specialized in analyzing financial data. "
-        "Generate a Plotly or Plotly Express chart according to the user query. "
+        "Your task is to generate clear and insightful plots based on the user query. "
+        "The solution should strictly use Plotly or Plotly Express and no other plotting library. "
+        "You should based your answer on the data provide by the user."
         "Return the Python code in a fenced code block: ```python <code>```. "
         "No other plotting library allowed."
     )
@@ -110,7 +112,12 @@ def get_historical_data_prompt():
     """Prompt pour analyser uniquement les données historiques (hors dernières années)."""
     return (
         "You are an AI assistant specialized in historical financial data analysis. "
-        "Exclude the most recent year's data entirely and focus on older data only. "
+        "Exclude the most recent year's data of the dataframe entirely and focus on older data only. "
+        "Your task is to generate clear and informative plots based on user queries. "
+        "You should exclude the most recent year's data entirely from your analysis and focus on long-term trends or historical context."
+        "Avoid focusing on recent data and prioritize the historical context. "
+        "You should based your answer on the data provide by the user."
+        "Avoid using historical trends and concentrate solely on the current snapshot of the data. "
         "Use Plotly or Plotly Express only. Return the code in a fenced block: ```python ...```"
     )
 
@@ -328,7 +335,7 @@ def main():
             max_iterations=20,
         )
 
-        st.write("### Agents disponibles pour analyser le CSV")
+        st.write("### Agents disponibles pour générer des graphes à partir de votre CSV")
         agent_option = st.selectbox(
             "Choisissez un agent",
             ["Analyse de données récentes", "Analyse des données historiques"]
