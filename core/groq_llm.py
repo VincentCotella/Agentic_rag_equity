@@ -1,11 +1,9 @@
-# core/groq_llm.py
-
 import os
 from dotenv import load_dotenv
 from langchain.llms.base import LLM
 from typing import Optional, List
 from pydantic import PrivateAttr, Field
-# Assuming you have a Groq client library
+# Hypothèse : vous avez une bibliothèque groq
 from groq import Groq
 
 load_dotenv()
@@ -28,14 +26,11 @@ class GROQLLM(LLM):
     def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
         try:
             chat_completion = self._client.chat.completions.create(
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt,
-                    }
-                ],
+                messages=[{"role": "user", "content": prompt}],
                 model=self.model,
             )
-            return chat_completion.choices[0].message.content if chat_completion.choices else ""
+            if chat_completion.choices:
+                return chat_completion.choices[0].message.content
+            return ""
         except Exception as e:
             return f"Error: {e}"

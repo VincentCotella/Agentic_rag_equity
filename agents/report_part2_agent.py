@@ -1,67 +1,69 @@
 # agents/report_part2_agent.py
 
+import logging
 from .base_agent import BaseAgent
-import json
+from core.edgar_direct_manager import EdgarDirectManager
+
+logger = logging.getLogger(__name__)
 
 class ReportPart2Agent(BaseAgent):
-    def __init__(self, llm, structured_agent, unstructured_agent, company_name: str, status_placeholder=None):
-        """
-        Initialize the agent for generating Part II of the report (Key Financial Figures).
-
-        Args:
-            llm: Instance of the language model used by the agent.
-            structured_agent: Instance of the StructuredDataAgent.
-            unstructured_agent: Instance of the UnstructuredDataAgent.
-            company_name (str): The name of the company.
-            status_placeholder: Streamlit placeholder for status messages.
-        """
+    def __init__(self, llm, unstructured_agent, company_name: str, status_placeholder=None):
         super().__init__(name="ReportPart2Agent", llm=llm)
         self.goal = "Generate Part II of the report: Key Financial Figures."
         self.backstory = "You are a financial analyst tasked with extracting key financial figures."
-        self.structured_agent = structured_agent
         self.unstructured_agent = unstructured_agent
         self.company_name = company_name
         self.status_placeholder = status_placeholder
 
-    def generate_response(self) -> dict:
+        self.edgar_manager = EdgarDirectManager(
+            ticker_symbol=self.company_name,
+            user_agent="Vincent Cotella vincent.cotella@edu.devinci.fr",
+            report_type="10-K"
+        )
+
+    def generate_response(self, use_rag: bool, context_dict: dict) -> dict:
         if self.status_placeholder:
             self.status_placeholder.info("ReportPart2Agent: Starting Part II generation...")
 
-        # **Subtasks for Part II**
         financial_fields = {
-            "Revenue": f"Retrieve the most recent total revenue of {self.company_name} as stated in the report.",
-            "Net Income": f"Retrieve the most recent net income or net loss of {self.company_name} as stated in the report.",
-            "Cash": f"Retrieve the amount of available cash and cash equivalents for {self.company_name}.",
+            "Revenue": f"Retrieve the most recent total revenue of {self.company_name}.",
+            "Net Income": f"Retrieve the most recent net income of {self.company_name}.",
+            "Cash": f"Retrieve the amount of available cash for {self.company_name}.",
             "Debt": f"Retrieve the total amount of debt for {self.company_name}.",
             "Equity": f"Retrieve the total equity amount for {self.company_name}.",
             "Operating Cash Flow": f"Retrieve the cash flow from operating activities for {self.company_name}."
         }
 
-        results = {}
+        # PART II => Items 5..9 => 
+        # On associe chaque champ à quelques items (max 2-3)
+        item_mapping = {
+            "Revenue": ["Item 6", "Item 7"],
+            "Net Income": ["Item 6", "Item 7"],
+            "Cash": ["Item 7", "Item 7A"],
+            "Debt": ["Item 7", "Item 7A"],
+            "Equity": ["Item 7", "Item 7A"],
+            "Operating Cash Flow": ["Item 7"]
+        }
 
-        # Process each financial field
+        results = {}
         for field, query in financial_fields.items():
             if self.status_placeholder:
                 self.status_placeholder.info(f"ReportPart2Agent: Processing {field}...")
 
-            # Retrieve unstructured data
-            unstructured_chunks = self.unstructured_agent.generate_response(query)
-            unstructured_data = " ".join(unstructured_chunks)
+            if use_rag:
+                chunks = self.unstructured_agent.generate_response(query)
+                context_data = " ".join(chunks)
+            else:
+                items_to_join = item_mapping.get(field, [])
+                context_data = self.edgar_manager.get_items_concat(items_to_join)
 
-            # Retrieve structured data
-            structured_data_df = self.structured_agent.generate_response(self.company_name)
-            structured_data_json = structured_data_df.to_json(orient='records')
-
-            # Combine data and ask LLM to extract the field
             prompt = (
                 f"{self.backstory}\n\n"
                 f"Goal: Extract the {field} of {self.company_name}.\n\n"
-                f"Structured Data:\n{structured_data_json}\n\n"
-                f"Unstructured Data:\n{unstructured_data}\n\n"
-                f"Please provide the {field} based on the data above, including the units (e.g., USD).\n"
+                f"Context:\n{context_data}\n\n"
+                f"Please provide the {field} based on the data above, including units.\n"
                 f"If not available, respond with 'Not Available'."
             )
-
             response = self.llm(prompt).strip()
             results[field] = response
 

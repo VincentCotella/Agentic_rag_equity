@@ -1,104 +1,194 @@
 # app.py
 
 import streamlit as st
-from core.data_management import (
-    initialize_database,
-    clear_database,
-    load_structured_data,
-    get_available_documents,
-)
-from core.multi_agentic_rag import MultiAgenticRAG
-from core.groq_llm import GROQLLM
-from config import GROQ_API_KEY, MODEL_NAME
 import os
 import requests
 import json
-import traceback
 import logging
+import traceback
 
-# Configure logging
+from config import GROQ_API_KEY, MODEL_NAME
+from core.groq_llm import GROQLLM
+from core.multi_agentic_rag import MultiAgenticRAG
+
+# On importe les fonctions utiles pour gérer la base Chroma (RAG)
+# Note: on ne fait plus "from core.data_management import initialize_database_with_api"
+from core.data_management import (
+    clear_database,
+    list_chroma_documents,
+    add_custom_documents
+)
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def main():
-    st.title("Multi-Agent Financial Analysis Assistant with GROQ")
+    st.title("10-K Report Generator (Unstructured Data Only)")
 
-    st.sidebar.header("Options")
-    reset_db = st.sidebar.button("Reset Database")
+    # -------------------------------------------------------------------------
+    # SIDEBAR - Options sur la base Chroma (RAG)
+    # -------------------------------------------------------------------------
+    st.sidebar.header("Database Options")
 
-    if reset_db:
+    # 1) Bouton pour Reset complet de Chroma
+    if st.sidebar.button("Reset Chroma DB"):
         with st.spinner("Resetting the database..."):
             try:
                 clear_database()
-                st.success("Database reset successfully!")
-                st.info("Please restart the application to apply changes.")
+                st.sidebar.success("Chroma database has been reset (deleted).")
+            except Exception as e:
+                st.sidebar.error(f"Error while resetting DB: {e}")
+                logger.error(traceback.format_exc())
                 st.stop()
-            except Exception as e:
-                st.error(f"Error resetting the database: {e}")
-                logger.error(f"Error resetting the database: {e}")
-                logger.error(traceback.format_exc())
 
-    st.sidebar.subheader("Upload Documents")
-    upload_pdf = st.sidebar.file_uploader("Upload PDF(s)", type=["pdf"], accept_multiple_files=True)
+    # 2) Bouton pour lister les documents existants
+    if st.sidebar.button("List Chroma Documents"):
+        docs_info = list_chroma_documents()
+        if not docs_info:
+            st.sidebar.info("No documents found in Chroma DB.")
+        else:
+            st.sidebar.write(f"Found {len(docs_info)} documents/chunks:")
+            for doc in docs_info:
+                st.sidebar.write(f"- ID: {doc['id']}")
+                st.sidebar.write(f"  Source: {doc['metadata']['source']}")
+                st.sidebar.write(f"  Snippet: {doc['content_snippet']}")
 
-    if upload_pdf:
-        pdf_dir = "PDF"
-        os.makedirs(pdf_dir, exist_ok=True)
-
-        # Save uploaded PDFs
-        uploaded_filenames = []
-        for uploaded_file in upload_pdf:
-            pdf_path = os.path.join(pdf_dir, uploaded_file.name)
-            with open(pdf_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            uploaded_filenames.append(uploaded_file.name)
-            st.sidebar.success(f"Uploaded file: {uploaded_file.name}")
-            logger.info(f"Uploaded file: {uploaded_file.name}")
-
-        # Allow user to select which documents to add
-        st.sidebar.subheader("Select Documents to Add to Database")
-        available_documents = get_available_documents()
-        documents_to_process = st.sidebar.multiselect(
-            "Select documents to add:",
-            options=uploaded_filenames,
-            default=uploaded_filenames  # By default, select all uploaded files
-        )
-
-        # "Process Documents" button
-        if st.sidebar.button("Process Documents"):
-            # Progress bar and status text
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-
-            def progress_callback(progress, message):
-                progress_bar.progress(progress)
-                status_text.text(message)
-
+    # 3) Téléversement de fichiers à ajouter manuellement dans Chroma
+    st.sidebar.write("## Add Custom Documents")
+    uploaded_files = st.sidebar.file_uploader(
+        "Choose .txt or .md files to embed in Chroma",
+        accept_multiple_files=True,
+        type=["txt", "md"]
+    )
+    if uploaded_files:
+        if st.sidebar.button("Add to DB"):
             try:
-                status_text.text("Processing documents...")
-                initialize_database(
-                    progress_callback=progress_callback,
-                    documents_to_process=documents_to_process
-                )
-                progress_bar.progress(1.0)
-                status_text.text("Document processing completed successfully.")
-                st.success("Documents have been added and indexed successfully!")
-                logger.info("Document processing completed successfully.")
-            except Exception as e:
-                st.error(f"Error during document processing: {e}")
-                st.error(traceback.format_exc())
-                progress_bar.empty()
-                status_text.empty()
-                logger.error(f"Error during document processing: {e}")
-                logger.error(traceback.format_exc())
-                return
-            finally:
-                # Clear progress bar and status text after completion
-                progress_bar.empty()
-                status_text.empty()
+                temp_dir = "temp_uploads"
+                os.makedirs(temp_dir, exist_ok=True)
+                file_paths = []
+                for uf in uploaded_files:
+                    temp_path = os.path.join(temp_dir, uf.name)
+                    with open(temp_path, "wb") as f:
+                        f.write(uf.getvalue())
+                    file_paths.append(temp_path)
 
-    st.sidebar.subheader("Other Actions")
-    if st.sidebar.button("Test GROQ API"):
+                add_custom_documents(file_paths)
+                st.sidebar.success(f"Successfully added {len(file_paths)} file(s) to Chroma DB!")
+            except Exception as e:
+                st.sidebar.error(f"Error while adding files to DB: {e}")
+                logger.error(traceback.format_exc())
+
+    # -------------------------------------------------------------------------
+    # MAIN LAYOUT - Génération du rapport 10-K
+    # -------------------------------------------------------------------------
+    st.header("Generate the 10-K Report")
+
+    # Saisie du ticker
+    ticker_symbol = st.text_input("Enter the company's ticker symbol (e.g., 'AAPL'):", "")
+
+    if st.button("Initialize System"):
+        if not ticker_symbol:
+            st.warning("Please enter a ticker symbol before initializing.")
+        else:
+            with st.spinner("Initializing the system..."):
+                try:
+                    # Ici, on ne fait plus initialize_database_with_api(ticker_symbol)
+                    # car la fonction a été retirée (ou est un stub).
+                    # On se contente de créer LLM + RAG :
+
+                    llm = GROQLLM(api_key=GROQ_API_KEY, model=MODEL_NAME)
+                    rag = MultiAgenticRAG(llm=llm, company_name=ticker_symbol)
+                    st.session_state["rag"] = rag
+                    st.success("System initialized successfully!")
+                except Exception as e:
+                    st.error(f"Error initializing system: {e}")
+                    logger.error(traceback.format_exc())
+                    st.stop()
+
+    # Vérifier si on a un RAG dans session_state
+    if "rag" in st.session_state:
+        rag = st.session_state["rag"]
+
+        context_choice = st.radio(
+            "Select context source for each part:",
+            ["Use RAG (vector DB)", "Use raw 10-K sections"]
+        )
+        use_rag = (context_choice == "Use RAG (vector DB)")
+
+        st.subheader("Generate Report Parts")
+
+        # PART I
+        if st.button("Generate Part I"):
+            try:
+                with st.spinner("Generating Part I..."):
+                    part1 = rag.generate_report_part1(use_rag=use_rag)
+                    st.subheader("Part I: General Presentation")
+                    st.json(part1)
+                    json_str = json.dumps(part1, indent=4)
+                    st.download_button("Download Part I JSON", data=json_str, file_name="part1.json")
+            except Exception as e:
+                st.error(f"Error generating Part I: {e}")
+                logger.error(traceback.format_exc())
+
+        # PART II
+        if st.button("Generate Part II"):
+            try:
+                with st.spinner("Generating Part II..."):
+                    part2 = rag.generate_report_part2(use_rag=use_rag)
+                    st.subheader("Part II: Key Financial Figures")
+                    st.json(part2)
+                    json_str = json.dumps(part2, indent=4)
+                    st.download_button("Download Part II JSON", data=json_str, file_name="part2.json")
+            except Exception as e:
+                st.error(f"Error generating Part II: {e}")
+                logger.error(traceback.format_exc())
+
+        # PART III
+        if st.button("Generate Part III"):
+            try:
+                with st.spinner("Generating Part III..."):
+                    part3 = rag.generate_report_part3(use_rag=use_rag)
+                    st.subheader("Part III: Annual Performance Analysis")
+                    st.json(part3)
+                    json_str = json.dumps(part3, indent=4)
+                    st.download_button("Download Part III JSON", data=json_str, file_name="part3.json")
+            except Exception as e:
+                st.error(f"Error generating Part III: {e}")
+                logger.error(traceback.format_exc())
+
+        # PART IV
+        if st.button("Generate Part IV"):
+            try:
+                with st.spinner("Generating Part IV..."):
+                    part4 = rag.generate_report_part4(use_rag=use_rag)
+                    st.subheader("Part IV: Market Position and Competitors")
+                    st.json(part4)
+                    json_str = json.dumps(part4, indent=4)
+                    st.download_button("Download Part IV JSON", data=json_str, file_name="part4.json")
+            except Exception as e:
+                st.error(f"Error generating Part IV: {e}")
+                logger.error(traceback.format_exc())
+
+        # PART V
+        if st.button("Generate Part V"):
+            try:
+                with st.spinner("Generating Part V..."):
+                    part5 = rag.generate_report_part5(use_rag=use_rag)
+                    st.subheader("Part V: Risks and Challenges")
+                    st.json(part5)
+                    json_str = json.dumps(part5, indent=4)
+                    st.download_button("Download Part V JSON", data=json_str, file_name="part5.json")
+            except Exception as e:
+                st.error(f"Error generating Part V: {e}")
+                logger.error(traceback.format_exc())
+    else:
+        st.info("Please initialize the system first (enter ticker & click 'Initialize System').")
+
+    # -------------------------------------------------------------------------
+    # TEST GROQ API
+    # -------------------------------------------------------------------------
+    st.header("Other Actions")
+    if st.button("Test GROQ API"):
         try:
             url = "https://api.groq.com/openai/v1/models"
             headers = {
@@ -108,80 +198,18 @@ def main():
             response = requests.get(url, headers=headers)
             response.raise_for_status()
             models = response.json()
-            st.sidebar.success("GROQ API is working correctly.")
-            st.sidebar.write(models)
+            st.success("GROQ API is working correctly.")
+            st.write(models)
         except Exception as e:
-            st.sidebar.error(f"Error calling GROQ API: {e}")
-            logger.error(f"Error calling GROQ API: {e}")
+            st.error(f"Error calling GROQ API: {e}")
             logger.error(traceback.format_exc())
 
-    st.header("Generate the 10-K Report")
-
-    # Input field for the company name
-    company_name = st.text_input("Enter the company name:")
-
-    # "Generate Report" button
-    if st.button("Generate Report"):
-        if company_name:
-            # Placeholders for status messages and progress bar
-            status_placeholder = st.empty()
-            progress_bar = st.progress(0)
-            total_steps = 5  # Adjust based on the number of report parts
-            current_step = 0
-
-            def report_progress_callback():
-                nonlocal current_step
-                current_step += 1
-                progress = current_step / total_steps
-                progress_bar.progress(progress)
-
-            try:
-                with st.spinner("Generating the report..."):
-                    llm = GROQLLM(api_key=GROQ_API_KEY, model=MODEL_NAME)
-                    rag = MultiAgenticRAG(llm=llm, company_name=company_name, status_placeholder=status_placeholder)
-                    # Generate the report
-                    report = rag.generate_report(progress_callback=report_progress_callback)
-                    # Display each part
-                    for part_name, part_content in report.items():
-                        st.subheader(part_name)
-                        if isinstance(part_content, dict):
-                            st.json(part_content)
-                            json_str = json.dumps(part_content, indent=4)
-                            st.download_button(
-                                label=f"Download {part_name} as JSON",
-                                data=json_str,
-                                file_name=f"{part_name.replace(' ', '_')}.json",
-                                mime="application/json"
-                            )
-                        else:
-                            st.write(part_content)
-                            st.download_button(
-                                label=f"Download {part_name} as Text",
-                                data=part_content,
-                                file_name=f"{part_name.replace(' ', '_')}.txt",
-                                mime="text/plain"
-                            )
-                        # Note: Removed the extra call to report_progress_callback() here
-                    status_placeholder.success("Report generation completed.")
-            except Exception as e:
-                st.error(f"Error during report generation: {e}")
-                st.error(traceback.format_exc())
-                logger.error(f"Error during report generation: {e}")
-                logger.error(traceback.format_exc())
-                return
-            finally:
-                # Clear the progress bar and status placeholder
-                progress_bar.empty()
-                status_placeholder.empty()
-        else:
-            st.warning("Please enter the company name before generating the report.")
-
+    # -------------------------------------------------------------------------
+    # SECTION - Structured Private Equity Data (placeholder)
+    # -------------------------------------------------------------------------
     st.header("Structured Private Equity Data")
-    structured_data = load_structured_data()
-    if not structured_data.empty:
-        st.dataframe(structured_data)
-    else:
-        st.write("No structured data available.")
+    st.write("No structured data available as per the current configuration.")
+
 
 if __name__ == "__main__":
     main()
