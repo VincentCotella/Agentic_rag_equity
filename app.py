@@ -1,18 +1,32 @@
 # app.py
 
-import streamlit as st
 import os
-import requests
+import re
 import json
 import logging
 import traceback
+import streamlit as st
+import pandas as pd
+import requests
 
 from config import GROQ_API_KEY, MODEL_NAME
 from core.groq_llm import GROQLLM
 from core.multi_agentic_rag import MultiAgenticRAG
 
-# On importe les fonctions utiles pour gérer la base Chroma (RAG)
-# Note: on ne fait plus "from core.data_management import initialize_database_with_api"
+# Pour la partie DataFrame & Plot
+import plotly.express as px
+import plotly.graph_objs as go
+from io import BytesIO
+
+# Tools/Agents LLM côté CSV
+from langchain_groq import ChatGroq
+from langchain.agents import AgentType
+from langchain.tools import Tool
+from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
+from groq import Groq  # si nécessaire
+import pandas as pd
+
+# RAG data_management: base Chroma
 from core.data_management import (
     clear_database,
     list_chroma_documents,
@@ -22,15 +36,98 @@ from core.data_management import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def main():
-    st.title("10-K Report Generator (Unstructured Data Only)")
+# --------------------------------------------------------------------------------
+# FONCTIONS SPÉCIFIQUES À LA PARTIE CSV / PLOT
+# --------------------------------------------------------------------------------
 
-    # -------------------------------------------------------------------------
-    # SIDEBAR - Options sur la base Chroma (RAG)
-    # -------------------------------------------------------------------------
+def load_dataframe(uploaded_file):
+    """Charge un fichier CSV dans un DataFrame Pandas."""
+    return pd.read_csv(uploaded_file)
+
+def display_dataframe_info(df):
+    """Affiche un aperçu du DataFrame."""
+    st.write("### Aperçu de vos données")
+    st.write(df.head())
+    st.write("### Colonnes disponibles")
+    st.write(df.columns.tolist())
+
+def filter_dataframe_columns(df):
+    """Permet à l'utilisateur de sélectionner des colonnes à afficher / manipuler."""
+    selected_columns = st.multiselect("Sélectionnez les colonnes à inclure", df.columns.tolist())
+    return df[selected_columns] if selected_columns else df
+
+def extract_python_code(text):
+    """Extrait le bloc de code python encapsulé entre ```python ...```."""
+    pattern = r'```python\s(.*?)```'
+    matches = re.findall(pattern, text, re.DOTALL)
+    if not matches:
+        st.warning("Aucun code Python trouvé dans la réponse.", icon="🚨")
+        return None
+    return matches[0].strip()
+
+def generate_plot_tool(query, df):
+    """Tool pour générer un plot en utilisant Plotly, basé sur la requête utilisateur."""
+    client = Groq()
+    code_prompt = (
+        "You are an AI assistant specialized in analyzing financial data. "
+        "Generate a Plotly or Plotly Express chart according to the user query. "
+        "Return the Python code in a fenced code block: ```python <code>```. "
+        "No other plotting library allowed."
+    )
+
+    # On appelle le modèle
+    response = client.chat.completions.create(
+        model='llama-3.1-8b-instant',
+        messages=[{"role": "user", "content": code_prompt + query}],
+        temperature=0.3,
+    )
+    # Extraction du code
+    code = extract_python_code(response.choices[0].message.content)
+    if code is None:
+        return "Aucun code Plotly valide n'a été généré."
+
+    # Supprime un éventuel fig.show() car on va l'afficher via st.plotly_chart
+    code = code.replace("fig.show()", "")
+    code += "\nst.plotly_chart(fig, theme='streamlit', use_container_width=True)"
+
+    # On exécute le code
+    try:
+        local_vars = {"df": df, "st": st, "px": px, "go": go}
+        exec(code, local_vars)
+        return "Plot generated successfully."
+    except Exception as e:
+        return f"Erreur lors de l'exécution du code généré: {e}"
+
+def get_recent_data_prompt():
+    """Prompt pour analyser uniquement les données récentes."""
+    return (
+        "You are an AI assistant specialized in analyzing recent financial data. "
+        "Focus on the two most recent years in the 'Date' column. "
+        "Use Plotly or Plotly Express only. Return the code in a fenced block: ```python ...```"
+    )
+
+def get_historical_data_prompt():
+    """Prompt pour analyser uniquement les données historiques (hors dernières années)."""
+    return (
+        "You are an AI assistant specialized in historical financial data analysis. "
+        "Exclude the most recent year's data entirely and focus on older data only. "
+        "Use Plotly or Plotly Express only. Return the code in a fenced block: ```python ...```"
+    )
+
+# --------------------------------------------------------------------------------
+# APPLICATION PRINCIPALE
+# --------------------------------------------------------------------------------
+
+def main():
+    st.set_page_config(page_title="10-K & Financial Data Analysis", layout="wide")
+
+    st.title("10-K Report Generator (Unstructured Data) + CSV Analysis")
+
+    # =========================
+    # SIDEBAR: Chroma DB options
+    # =========================
     st.sidebar.header("Database Options")
 
-    # 1) Bouton pour Reset complet de Chroma
     if st.sidebar.button("Reset Chroma DB"):
         with st.spinner("Resetting the database..."):
             try:
@@ -41,7 +138,6 @@ def main():
                 logger.error(traceback.format_exc())
                 st.stop()
 
-    # 2) Bouton pour lister les documents existants
     if st.sidebar.button("List Chroma Documents"):
         docs_info = list_chroma_documents()
         if not docs_info:
@@ -53,7 +149,7 @@ def main():
                 st.sidebar.write(f"  Source: {doc['metadata']['source']}")
                 st.sidebar.write(f"  Snippet: {doc['content_snippet']}")
 
-    # 3) Téléversement de fichiers à ajouter manuellement dans Chroma
+    # Upload custom docs to Chroma
     st.sidebar.write("## Add Custom Documents")
     uploaded_files = st.sidebar.file_uploader(
         "Choose .txt or .md files to embed in Chroma",
@@ -78,12 +174,10 @@ def main():
                 st.sidebar.error(f"Error while adding files to DB: {e}")
                 logger.error(traceback.format_exc())
 
-    # -------------------------------------------------------------------------
-    # MAIN LAYOUT - Génération du rapport 10-K
-    # -------------------------------------------------------------------------
+    # =========================
+    # SECTION: 10-K REPORT
+    # =========================
     st.header("Generate the 10-K Report")
-
-    # Saisie du ticker
     ticker_symbol = st.text_input("Enter the company's ticker symbol (e.g., 'AAPL'):", "")
 
     if st.button("Initialize System"):
@@ -92,10 +186,6 @@ def main():
         else:
             with st.spinner("Initializing the system..."):
                 try:
-                    # Ici, on ne fait plus initialize_database_with_api(ticker_symbol)
-                    # car la fonction a été retirée (ou est un stub).
-                    # On se contente de créer LLM + RAG :
-
                     llm = GROQLLM(api_key=GROQ_API_KEY, model=MODEL_NAME)
                     rag = MultiAgenticRAG(llm=llm, company_name=ticker_symbol)
                     st.session_state["rag"] = rag
@@ -105,10 +195,8 @@ def main():
                     logger.error(traceback.format_exc())
                     st.stop()
 
-    # Vérifier si on a un RAG dans session_state
     if "rag" in st.session_state:
         rag = st.session_state["rag"]
-
         context_choice = st.radio(
             "Select context source for each part:",
             ["Use RAG (vector DB)", "Use raw 10-K sections"]
@@ -117,7 +205,6 @@ def main():
 
         st.subheader("Generate Report Parts")
 
-        # PART I
         if st.button("Generate Part I"):
             try:
                 with st.spinner("Generating Part I..."):
@@ -130,7 +217,6 @@ def main():
                 st.error(f"Error generating Part I: {e}")
                 logger.error(traceback.format_exc())
 
-        # PART II
         if st.button("Generate Part II"):
             try:
                 with st.spinner("Generating Part II..."):
@@ -143,7 +229,6 @@ def main():
                 st.error(f"Error generating Part II: {e}")
                 logger.error(traceback.format_exc())
 
-        # PART III
         if st.button("Generate Part III"):
             try:
                 with st.spinner("Generating Part III..."):
@@ -156,7 +241,6 @@ def main():
                 st.error(f"Error generating Part III: {e}")
                 logger.error(traceback.format_exc())
 
-        # PART IV
         if st.button("Generate Part IV"):
             try:
                 with st.spinner("Generating Part IV..."):
@@ -169,7 +253,6 @@ def main():
                 st.error(f"Error generating Part IV: {e}")
                 logger.error(traceback.format_exc())
 
-        # PART V
         if st.button("Generate Part V"):
             try:
                 with st.spinner("Generating Part V..."):
@@ -184,9 +267,91 @@ def main():
     else:
         st.info("Please initialize the system first (enter ticker & click 'Initialize System').")
 
-    # -------------------------------------------------------------------------
+    # =========================
+    # SECTION: FINANCIAL CSV DATA ANALYSIS
+    # =========================
+    st.header("Financial CSV Data Analysis")
+
+    # Upload CSV
+    uploaded_csv = st.file_uploader("Upload a CSV for financial data analysis", type=["csv"])
+
+    if uploaded_csv:
+        df = load_dataframe(uploaded_csv)
+        display_dataframe_info(df)
+        filtered_df = filter_dataframe_columns(df)
+
+        # Configuration du LLM Groq
+        st.sidebar.header("Configuration du LLM pour CSV Analysis")
+        model_name_csv = "llama-3.1-8b-instant"  # ou un autre
+        max_tokens_csv = st.sidebar.slider("Max tokens (CSV LLM)", min_value=100, max_value=2000, value=500)
+
+        llm_csv = ChatGroq(
+            groq_api_key=GROQ_API_KEY,
+            model=model_name_csv,
+            temperature=0.3,
+            max_tokens=max_tokens_csv,
+        )
+
+        # Création d'agents pour data analysis
+        recent_prompt = get_recent_data_prompt()
+        historical_prompt = get_historical_data_prompt()
+
+        recent_data_tool = Tool(
+            name="Generate Plot (Recent Data)",
+            func=lambda query: generate_plot_tool(query, filtered_df),
+            description=recent_prompt
+        )
+        historical_data_tool = Tool(
+            name="Generate Plot (Historical Data)",
+            func=lambda query: generate_plot_tool(query, filtered_df),
+            description=historical_prompt
+        )
+
+        pandas_df_recent_agent = create_pandas_dataframe_agent(
+            llm_csv,
+            filtered_df,
+            extra_tools=[recent_data_tool],
+            verbose=True,
+            max_iterations=20,
+            agent_type=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+            allow_dangerous_code=True,
+            handle_parsing_errors=True,
+        )
+        pandas_df_historical_agent = create_pandas_dataframe_agent(
+            llm_csv,
+            filtered_df,
+            extra_tools=[historical_data_tool],
+            verbose=True,
+            agent_type=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+            allow_dangerous_code=True,
+            handle_parsing_errors=True,
+            max_iterations=20,
+        )
+
+        st.write("### Agents disponibles pour analyser le CSV")
+        agent_option = st.selectbox(
+            "Choisissez un agent",
+            ["Analyse de données récentes", "Analyse des données historiques"]
+        )
+
+        query = st.text_input("Entrez une requête pour générer un plot à partir du CSV :")
+
+        if query:
+            if agent_option == "Analyse de données récentes":
+                with st.spinner("Génération du plot (données récentes)..."):
+                    response = pandas_df_recent_agent.invoke(query)
+                    st.write("### Résultat / Plot")
+                    st.write(response)
+            else:
+                with st.spinner("Génération du plot (données historiques)..."):
+                    response = pandas_df_historical_agent.invoke(query)
+                    st.write("### Résultat / Plot")
+                    st.write(response)
+
+
+    # =========================
     # TEST GROQ API
-    # -------------------------------------------------------------------------
+    # =========================
     st.header("Other Actions")
     if st.button("Test GROQ API"):
         try:
@@ -204,9 +369,9 @@ def main():
             st.error(f"Error calling GROQ API: {e}")
             logger.error(traceback.format_exc())
 
-    # -------------------------------------------------------------------------
-    # SECTION - Structured Private Equity Data (placeholder)
-    # -------------------------------------------------------------------------
+    # =========================
+    # STRUCTURED PRIVATE EQUITY DATA
+    # =========================
     st.header("Structured Private Equity Data")
     st.write("No structured data available as per the current configuration.")
 

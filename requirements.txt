@@ -6,3 +6,7 @@ pydantic
 groq
 requests
 edgartools
+tabulate
+langchain_experimental
+langchain_groq
+python-dotenv
